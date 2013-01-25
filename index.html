@@ -1,0 +1,348 @@
+<html>
+  <head>
+    <title>Gravity</title>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <style type="text/css">
+      body {
+        font-family: Monospace;
+        background-color: #111;
+        margin: 0px;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="text/javascript" src="js/three.js/build/three.js"></script>
+    <script type="text/javascript" src="js/three.js/examples/js/libs/stats.min.js"></script>
+    <script type="text/javascript" src="js/three.js/examples/js/controls/TrackballControls.js"></script>
+    <script type="text/javascript" src="js/underscore/underscore-min.js"></script>
+
+    <script type="x-shader/x-vertex" id="vertexShader">
+
+      uniform float amplitude;
+      attribute vec3 displacement;
+
+      void main() {
+        vec3 newPosition = position + amplitude * displacement;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(newPosition, 1.0);
+      }
+
+    </script>
+
+    <script type="x-shader/x-fragment" id="fragmentShader">
+
+      uniform vec3 color;
+      uniform float opacity;
+
+      void main() {
+        gl_FragColor = vec4(color, opacity);
+      }
+
+    </script>
+
+    <script type="text/javascript">
+
+      var container, stats;
+      var clock, camera, scene, renderer, controls;
+      var effects = [];
+
+      var world = new World();
+      var gravity = new Gravity(world);
+      world.addForce(gravity);
+      world.addBodies([
+        new Body(1.0, 100, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)),
+        new Body(0.1, 10, new THREE.Vector3(400, 0, 0), new THREE.Vector3(0, 7.5, 0))
+      ]);
+
+      function Body(mass, radius, position, velocity, id) {
+        this.id = id || "Unknown";
+        this.mass = mass || 0;
+        this.radius = radius || 1;
+        this.state = new State(position, velocity);
+        this.clone = function() {
+          return new Body(this.mass, this.radius, this.state.position.clone(), this.state.velocity.clone());
+        };
+      }
+
+      function State(position, velocity) {
+        this.position = position || new THREE.Vector3();
+        this.velocity = velocity || new THREE.Vector3();
+        this.clone = function() {
+          return new State(this.position.clone(), this.velocity.clone());
+        };
+      }
+
+      function Derivative(dx, dv) {
+        this.dx = dx || new THREE.Vector3(); // Change in Position
+        this.dv = dv || new THREE.Vector3(); // Change in Velocity
+      }
+
+      function Field(positions) {
+        this.positions = positions;
+        this.potential = [];
+      }
+
+      function Gravity(world) {
+        var G = 1.0;
+        var force = this;
+        force.fields = [];
+        force.addField = function(field) {
+          force.fields.push(field);
+        };
+        force.acceleration = function(body) {
+          var g = new THREE.Vector3();
+          _(world.bodies).each(function(otherBody) {
+            var A = body;
+            var B = otherBody;
+            if (A !== B) {
+              var v = new THREE.Vector3();
+              v.sub(B.state.position, A.state.position);
+              v.normalize();
+              var r = v.length();
+              if (!_(r).isNaN() && r !== 0) {
+                v.multiplyScalar(G * A.mass * B.mass / (r * r));
+                g.addSelf(v);
+              }
+            }
+          });
+          return g;
+        };
+        force.potential = function(position) {
+          var g = new THREE.Vector3();
+          _(world.bodies).each(function(body) {
+            var R = new THREE.Vector3().sub(body.state.position, position);
+            var v = R.clone().normalize();
+            v.divideScalar(R.length() * R.length());
+            v.multiplyScalar(G * body.mass);
+            g.addSelf(v);
+          });
+          return g;
+        };
+        force.radius = function(body, field) {
+          return Math.sqrt(G * body.mass * field.density);
+        };
+      }
+
+      function World() {
+
+        this.bodies = [];
+        this.forces = [];
+
+        var world = this;
+
+        this.addBody = function(body) {
+          world.bodies.push(body);
+        };
+
+        this.addBodies = function(bodies) {
+          _(bodies).each(function(body) {
+            world.addBody(body);
+          });
+        };
+
+        this.addForce = function(force) {
+          world.forces.push(force);
+        };
+
+        this.update = function(t, dt) {
+          integrate(t, dt);
+          radiate(t, dt);
+        };
+
+        function integrate(t, dt) {
+          var bodies = world.bodies;
+          _(bodies).each(function(body) {
+            var a = evaluate(body, t, 0.0, new Derivative());
+            var b = evaluate(body, t, 0.5 * dt, a);
+            var c = evaluate(body, t, 0.5 * dt, b);
+            var d = evaluate(body, t, 1.0 * dt, c);
+            var dx = increment(a.dx, b.dx, c.dx, d.dx);
+            var dv = increment(a.dv, b.dv, c.dv, d.dv);
+            body.state.position.addSelf(dx.multiplyScalar(dt));
+            body.state.velocity.addSelf(dv.multiplyScalar(dt));
+          });
+        }
+
+        function evaluate(initial, t, dt, d) {
+          var output = initial.clone();
+          var dx = d.dx.clone();
+          var dv = d.dv.clone();
+          output.state.position = new THREE.Vector3().add(initial.state.position, dx.multiplyScalar(dt));
+          output.state.velocity = new THREE.Vector3().add(initial.state.velocity, dv.multiplyScalar(dt));
+          return new Derivative(output.state.velocity, acceleration(output));
+        }
+
+        function increment(a, b, c, d) {
+          // (a + 2b + 2c + d) / 6
+          var i = new THREE.Vector3();
+          i.addSelf(a);
+          i.addSelf(new THREE.Vector3().add(b, c).multiplyScalar(2));
+          i.addSelf(d);
+          i.divideScalar(6.0);
+          return i;
+        }
+
+        function acceleration(body) {
+          var a = new THREE.Vector3();
+          var forces = world.forces;
+          _(forces).each(function(force) {
+            a.addSelf(force.acceleration(body));
+          });
+          return a;
+        }
+
+        function radiate(t, dt) {
+          var forces = world.forces;
+          _(forces).each(function(force) {
+            _(force.fields).each(function(field) {
+              field.potential = radiation(force, field);
+            });
+          });
+        }
+
+        function radiation(force, field) {
+          var bodies = world.bodies;
+          return _(field.positions).map(function(position) {
+            return force.potential(position);
+          });
+        }
+
+      }
+
+      init();
+      animate();
+
+      function init() {
+
+          var w = window.innerWidth;
+          var h = window.innerHeight;
+
+          container = document.createElement('div');
+          document.body.appendChild(container);
+
+          clock = new THREE.Clock(); // Time
+
+          scene = new THREE.Scene(); // Space
+
+          // Physical Bodies
+
+          _(world.bodies).each(function(body) {
+            var geometry = new THREE.SphereGeometry(body.radius, 16, 16);
+            var material = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+            var mesh = new THREE.Mesh(geometry, material);
+            mesh.position = body.state.position;
+            body.mesh = mesh;
+            scene.add(mesh);
+          });
+
+          // Gravity Effect
+          
+          (function() {
+            var size = 1000;
+            var density = 80;
+            var geometry = new THREE.PlaneGeometry(size, size, density, density);
+            var shader = THREE.GravityShader;
+            var attributes = {
+              displacement: { type: 'v3', value: [] }
+            };
+            var uniforms = {
+              color: { type: 'c', value: new THREE.Color(0xffffff) },
+              opacity: { type: 'f', value: 0.1 },
+              amplitude: { type: 'f', value: 50.0 }
+            };
+            var material = new THREE.ShaderMaterial({
+              attributes: attributes,
+              uniforms: uniforms,
+              vertexShader: document.getElementById('vertexShader').textContent,
+              fragmentShader: document.getElementById('fragmentShader').textContent,
+              wireframe: true,
+              wireframeLinewidth: 2,
+              transparent: true,
+              blending: THREE.AdditiveBlending
+            });
+            var mesh = new THREE.Mesh(geometry, material);
+            scene.add(mesh);
+            var positions = geometry.vertices;
+            for (var i = 0; i < positions.length; ++i) {
+              attributes.displacement.value[i] = new THREE.Vector3(0, 0, 0);
+            }
+            var field = new Field(positions);
+            gravity.addField(field);
+            effects.push(function() {
+              var displacement = attributes.displacement;
+              var opacity = uniforms.opacity;
+              if (displacement.value.length === field.potential.length) {
+                for (var i = 0; i < displacement.value.length; ++i) {
+                  var p = field.potential[i];
+                  var d = p.length();
+                  var k = 30000.0;
+                  displacement.value[i].z = d * k;
+                }
+              }
+              displacement.needsUpdate = true;
+            });
+          })();
+
+          camera = new THREE.PerspectiveCamera(30, w / h, 1, 10000);
+          camera.position.y = -1000;
+          camera.position.z = -2000;
+
+          renderer = new THREE.WebGLRenderer();
+          renderer.setSize(w, h);
+
+          container.appendChild(renderer.domElement);
+
+          controls = new THREE.TrackballControls(camera, renderer.domElement);
+
+          initialized = true;
+
+      }
+
+      function animate() {
+
+          requestAnimationFrame(animate);
+          render();
+          update();
+
+      }
+
+      function update() {
+
+        var dt = clock.getDelta();
+        var t = clock.getElapsedTime();
+        var s = 50;
+        world.update(t * s, dt * s);
+        controls.update();
+
+      }
+
+      function render() {
+
+        camera.lookAt(scene.position);
+        renderer.render(scene, camera);
+        _(effects).each(function(render) {
+          render();
+        });
+
+      }
+
+      function onWindowResize() {
+
+        var w = window.innerWidth
+        var h = window.innerHeight;
+
+        camera.left = -w / 2;
+        camera.right = w / 2;
+        camera.top = h / 2;
+        camera.bottom -h / 2;
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(w, h);
+        controls.handleResize();
+        render();
+
+      }
+
+    </script>
+  </body>
+</html>
